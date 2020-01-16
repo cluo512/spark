@@ -19,13 +19,14 @@ package org.apache.spark.status.api.v1
 import java.io.OutputStream
 import java.util.{List => JList}
 import java.util.zip.ZipOutputStream
-import javax.ws.rs.{GET, Path, PathParam, Produces, QueryParam}
+import javax.ws.rs._
 import javax.ws.rs.core.{MediaType, Response, StreamingOutput}
 
 import scala.util.control.NonFatal
 
-import org.apache.spark.JobExecutionStatus
-import org.apache.spark.ui.SparkUI
+import org.apache.spark.{JobExecutionStatus, SparkContext}
+import org.apache.spark.status.api.v1
+import org.apache.spark.util.Utils
 
 @Produces(Array(MediaType.APPLICATION_JSON))
 private[v1] class AbstractApplicationResource extends BaseAppResource {
@@ -52,6 +53,29 @@ private[v1] class AbstractApplicationResource extends BaseAppResource {
   def executorList(): Seq[ExecutorSummary] = withUI(_.store.executorList(true))
 
   @GET
+  @Path("executors/{executorId}/threads")
+  def threadDump(@PathParam("executorId") execId: String): Array[ThreadStackTrace] = withUI { ui =>
+    if (execId != SparkContext.DRIVER_IDENTIFIER && !execId.forall(Character.isDigit)) {
+      throw new BadParameterException(
+        s"Invalid executorId: neither '${SparkContext.DRIVER_IDENTIFIER}' nor number.")
+    }
+
+    val safeSparkContext = ui.sc.getOrElse {
+      throw new ServiceUnavailable("Thread dumps not available through the history server.")
+    }
+
+    ui.store.asOption(ui.store.executorSummary(execId)) match {
+      case Some(executorSummary) if executorSummary.isActive =>
+          val safeThreadDump = safeSparkContext.getExecutorThreadDump(execId).getOrElse {
+            throw new NotFoundException("No thread dump is available.")
+          }
+          safeThreadDump
+      case Some(_) => throw new BadParameterException("Executor is not active.")
+      case _ => throw new NotFoundException("Executor does not exist.")
+    }
+  }
+
+  @GET
   @Path("allexecutors")
   def allExecutorList(): Seq[ExecutorSummary] = withUI(_.store.executorList(false))
 
@@ -75,7 +99,15 @@ private[v1] class AbstractApplicationResource extends BaseAppResource {
 
   @GET
   @Path("environment")
-  def environmentInfo(): ApplicationEnvironmentInfo = withUI(_.store.environmentInfo())
+  def environmentInfo(): ApplicationEnvironmentInfo = withUI { ui =>
+    val envInfo = ui.store.environmentInfo()
+    new v1.ApplicationEnvironmentInfo(
+      envInfo.runtime,
+      Utils.redact(ui.conf, envInfo.sparkProperties),
+      Utils.redact(ui.conf, envInfo.hadoopProperties),
+      Utils.redact(ui.conf, envInfo.systemProperties),
+      envInfo.classpathEntries)
+  }
 
   @GET
   @Path("logs")
@@ -117,11 +149,8 @@ private[v1] class AbstractApplicationResource extends BaseAppResource {
         .header("Content-Type", MediaType.APPLICATION_OCTET_STREAM)
         .build()
     } catch {
-      case NonFatal(e) =>
-        Response.serverError()
-          .entity(s"Event logs are not available for app: $appId.")
-          .status(Response.Status.SERVICE_UNAVAILABLE)
-          .build()
+      case NonFatal(_) =>
+        throw new ServiceUnavailable(s"Event logs are not available for app: $appId.")
     }
   }
 
@@ -155,7 +184,7 @@ private[v1] class OneApplicationAttemptResource extends AbstractApplicationResou
   def getAttempt(): ApplicationAttemptInfo = {
     uiRoot.getApplicationInfo(appId)
       .flatMap { app =>
-        app.attempts.filter(_.attemptId == attemptId).headOption
+        app.attempts.find(_.attemptId.contains(attemptId))
       }
       .getOrElse {
         throw new NotFoundException(s"unknown app $appId, attempt $attemptId")

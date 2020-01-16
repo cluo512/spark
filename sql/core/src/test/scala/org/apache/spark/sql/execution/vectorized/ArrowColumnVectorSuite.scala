@@ -21,8 +21,8 @@ import org.apache.arrow.vector._
 import org.apache.arrow.vector.complex._
 
 import org.apache.spark.SparkFunSuite
-import org.apache.spark.sql.execution.arrow.ArrowUtils
 import org.apache.spark.sql.types._
+import org.apache.spark.sql.util.ArrowUtils
 import org.apache.spark.sql.vectorized.ArrowColumnVector
 import org.apache.spark.unsafe.types.UTF8String
 
@@ -42,6 +42,7 @@ class ArrowColumnVectorSuite extends SparkFunSuite {
 
     val columnVector = new ArrowColumnVector(vector)
     assert(columnVector.dataType === BooleanType)
+    assert(columnVector.hasNull)
     assert(columnVector.numNulls === 1)
 
     (0 until 10).foreach { i =>
@@ -69,6 +70,7 @@ class ArrowColumnVectorSuite extends SparkFunSuite {
 
     val columnVector = new ArrowColumnVector(vector)
     assert(columnVector.dataType === ByteType)
+    assert(columnVector.hasNull)
     assert(columnVector.numNulls === 1)
 
     (0 until 10).foreach { i =>
@@ -96,6 +98,7 @@ class ArrowColumnVectorSuite extends SparkFunSuite {
 
     val columnVector = new ArrowColumnVector(vector)
     assert(columnVector.dataType === ShortType)
+    assert(columnVector.hasNull)
     assert(columnVector.numNulls === 1)
 
     (0 until 10).foreach { i =>
@@ -123,6 +126,7 @@ class ArrowColumnVectorSuite extends SparkFunSuite {
 
     val columnVector = new ArrowColumnVector(vector)
     assert(columnVector.dataType === IntegerType)
+    assert(columnVector.hasNull)
     assert(columnVector.numNulls === 1)
 
     (0 until 10).foreach { i =>
@@ -150,6 +154,7 @@ class ArrowColumnVectorSuite extends SparkFunSuite {
 
     val columnVector = new ArrowColumnVector(vector)
     assert(columnVector.dataType === LongType)
+    assert(columnVector.hasNull)
     assert(columnVector.numNulls === 1)
 
     (0 until 10).foreach { i =>
@@ -177,6 +182,7 @@ class ArrowColumnVectorSuite extends SparkFunSuite {
 
     val columnVector = new ArrowColumnVector(vector)
     assert(columnVector.dataType === FloatType)
+    assert(columnVector.hasNull)
     assert(columnVector.numNulls === 1)
 
     (0 until 10).foreach { i =>
@@ -204,6 +210,7 @@ class ArrowColumnVectorSuite extends SparkFunSuite {
 
     val columnVector = new ArrowColumnVector(vector)
     assert(columnVector.dataType === DoubleType)
+    assert(columnVector.hasNull)
     assert(columnVector.numNulls === 1)
 
     (0 until 10).foreach { i =>
@@ -232,6 +239,7 @@ class ArrowColumnVectorSuite extends SparkFunSuite {
 
     val columnVector = new ArrowColumnVector(vector)
     assert(columnVector.dataType === StringType)
+    assert(columnVector.hasNull)
     assert(columnVector.numNulls === 1)
 
     (0 until 10).foreach { i =>
@@ -258,6 +266,7 @@ class ArrowColumnVectorSuite extends SparkFunSuite {
 
     val columnVector = new ArrowColumnVector(vector)
     assert(columnVector.dataType === BinaryType)
+    assert(columnVector.hasNull)
     assert(columnVector.numNulls === 1)
 
     (0 until 10).foreach { i =>
@@ -300,6 +309,7 @@ class ArrowColumnVectorSuite extends SparkFunSuite {
 
     val columnVector = new ArrowColumnVector(vector)
     assert(columnVector.dataType === ArrayType(IntegerType))
+    assert(columnVector.hasNull)
     assert(columnVector.numNulls === 1)
 
     val array0 = columnVector.getArray(0)
@@ -326,7 +336,7 @@ class ArrowColumnVectorSuite extends SparkFunSuite {
     val allocator = ArrowUtils.rootAllocator.newChildAllocator("struct", 0, Long.MaxValue)
     val schema = new StructType().add("int", IntegerType).add("long", LongType)
     val vector = ArrowUtils.toArrowField("struct", schema, nullable = false, null)
-      .createVector(allocator).asInstanceOf[NullableMapVector]
+      .createVector(allocator).asInstanceOf[StructVector]
 
     vector.allocateNew()
     val intVector = vector.getChildByOrdinal(0).asInstanceOf[IntVector]
@@ -344,6 +354,7 @@ class ArrowColumnVectorSuite extends SparkFunSuite {
 
     val columnVector = new ArrowColumnVector(vector)
     assert(columnVector.dataType === schema)
+    assert(!columnVector.hasNull)
     assert(columnVector.numNulls === 0)
 
     val row0 = columnVector.getStruct(0)
@@ -362,7 +373,7 @@ class ArrowColumnVectorSuite extends SparkFunSuite {
     val allocator = ArrowUtils.rootAllocator.newChildAllocator("struct", 0, Long.MaxValue)
     val schema = new StructType().add("int", IntegerType).add("long", LongType)
     val vector = ArrowUtils.toArrowField("struct", schema, nullable = true, null)
-      .createVector(allocator).asInstanceOf[NullableMapVector]
+      .createVector(allocator).asInstanceOf[StructVector]
     vector.allocateNew()
     val intVector = vector.getChildByOrdinal(0).asInstanceOf[IntVector]
     val longVector = vector.getChildByOrdinal(1).asInstanceOf[BigIntVector]
@@ -396,6 +407,7 @@ class ArrowColumnVectorSuite extends SparkFunSuite {
 
     val columnVector = new ArrowColumnVector(vector)
     assert(columnVector.dataType === schema)
+    assert(columnVector.hasNull)
     assert(columnVector.numNulls === 1)
 
     val row0 = columnVector.getStruct(0)

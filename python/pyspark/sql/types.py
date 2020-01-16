@@ -15,6 +15,7 @@
 # limitations under the License.
 #
 
+import os
 import sys
 import decimal
 import time
@@ -25,6 +26,7 @@ import re
 import base64
 from array import array
 import ctypes
+import warnings
 
 if sys.version >= "3":
     long = int
@@ -35,7 +37,6 @@ from py4j.java_gateway import JavaClass
 
 from pyspark import SparkContext
 from pyspark.serializers import CloudPickleSerializer
-from pyspark.util import _exception_message
 
 __all__ = [
     "DataType", "NullType", "StringType", "BinaryType", "BooleanType", "DateType",
@@ -207,7 +208,7 @@ class DecimalType(FractionalType):
     and scale (the number of digits on the right of dot). For example, (5, 2) can
     support the value from [-999.99 to 999.99].
 
-    The precision can be up to 38, the scale must less or equal to precision.
+    The precision can be up to 38, the scale must be less or equal to precision.
 
     When create a DecimalType, the default precision and scale is (10, 0). When infer
     schema from decimal.Decimal objects, it will be DecimalType(38, 18).
@@ -290,7 +291,8 @@ class ArrayType(DataType):
         >>> ArrayType(StringType(), False) == ArrayType(StringType())
         False
         """
-        assert isinstance(elementType, DataType), "elementType should be DataType"
+        assert isinstance(elementType, DataType),\
+            "elementType %s should be an instance of %s" % (elementType, DataType)
         self.elementType = elementType
         self.containsNull = containsNull
 
@@ -344,8 +346,10 @@ class MapType(DataType):
         ...        == MapType(StringType(), FloatType()))
         False
         """
-        assert isinstance(keyType, DataType), "keyType should be DataType"
-        assert isinstance(valueType, DataType), "valueType should be DataType"
+        assert isinstance(keyType, DataType),\
+            "keyType %s should be an instance of %s" % (keyType, DataType)
+        assert isinstance(valueType, DataType),\
+            "valueType %s should be an instance of %s" % (valueType, DataType)
         self.keyType = keyType
         self.valueType = valueType
         self.valueContainsNull = valueContainsNull
@@ -403,8 +407,9 @@ class StructField(DataType):
         ...      == StructField("f2", StringType(), True))
         False
         """
-        assert isinstance(dataType, DataType), "dataType should be DataType"
-        assert isinstance(name, basestring), "field name should be string"
+        assert isinstance(dataType, DataType),\
+            "dataType %s should be an instance of %s" % (dataType, DataType)
+        assert isinstance(name, basestring), "field name %s should be string" % (name)
         if not isinstance(name, str):
             name = name.encode('utf-8')
         self.name = name
@@ -454,9 +459,6 @@ class StructType(DataType):
 
     Iterating a :class:`StructType` will iterate its :class:`StructField`\\s.
     A contained :class:`StructField` can be accessed by name or position.
-
-    .. note:: `names` attribute is deprecated in 2.3. Use `fieldNames` method instead
-        to get a list of field names.
 
     >>> struct1 = StructType([StructField("f1", StringType(), True)])
     >>> struct1["f1"]
@@ -752,42 +754,7 @@ _all_complex_types = dict((v.typeName(), v)
                           for v in [ArrayType, MapType, StructType])
 
 
-_FIXED_DECIMAL = re.compile("decimal\\(\\s*(\\d+)\\s*,\\s*(\\d+)\\s*\\)")
-
-
-_BRACKETS = {'(': ')', '[': ']', '{': '}'}
-
-
-def _ignore_brackets_split(s, separator):
-    """
-    Splits the given string by given separator, but ignore separators inside brackets pairs, e.g.
-    given "a,b" and separator ",", it will return ["a", "b"], but given "a<b,c>, d", it will return
-    ["a<b,c>", "d"].
-    """
-    parts = []
-    buf = ""
-    level = 0
-    for c in s:
-        if c in _BRACKETS.keys():
-            level += 1
-            buf += c
-        elif c in _BRACKETS.values():
-            if level == 0:
-                raise ValueError("Brackets are not correctly paired: %s" % s)
-            level -= 1
-            buf += c
-        elif c == separator and level > 0:
-            buf += c
-        elif c == separator:
-            parts.append(buf)
-            buf = ""
-        else:
-            buf += c
-
-    if len(buf) == 0:
-        raise ValueError("The %s cannot be the last char: %s" % (separator, s))
-    parts.append(buf)
-    return parts
+_FIXED_DECIMAL = re.compile(r"decimal\(\s*(\d+)\s*,\s*(-?\d+)\s*\)")
 
 
 def _parse_datatype_string(s):
@@ -900,6 +867,8 @@ def _parse_datatype_json_string(json_string):
     >>> complex_maptype = MapType(complex_structtype,
     ...                           complex_arraytype, False)
     >>> check_datatype(complex_maptype)
+    >>> # Decimal with negative scale.
+    >>> check_datatype(DecimalType(1,-1))
     """
     return _parse_datatype_json_value(json.loads(json_string))
 
@@ -943,6 +912,11 @@ if sys.version < "3":
     _type_mappings.update({
         unicode: StringType,
         long: LongType,
+    })
+
+if sys.version >= "3":
+    _type_mappings.update({
+        bytes: BinaryType,
     })
 
 # Mapping Python array types to Spark SQL DataType
@@ -1053,14 +1027,12 @@ def _infer_type(obj):
         for key, value in obj.items():
             if key is not None and value is not None:
                 return MapType(_infer_type(key), _infer_type(value), True)
-        else:
-            return MapType(NullType(), NullType(), True)
+        return MapType(NullType(), NullType(), True)
     elif isinstance(obj, list):
         for v in obj:
             if v is not None:
                 return ArrayType(_infer_type(obj[0]), True)
-        else:
-            return ArrayType(NullType(), True)
+        return ArrayType(NullType(), True)
     elif isinstance(obj, array):
         if obj.typecode in _array_type_mappings:
             return ArrayType(_array_type_mappings[obj.typecode](), False)
@@ -1225,7 +1197,7 @@ _acceptable_types = {
     DoubleType: (float,),
     DecimalType: (decimal.Decimal,),
     StringType: (str, unicode),
-    BinaryType: (bytearray,),
+    BinaryType: (bytearray, bytes),
     DateType: (datetime.date, datetime.datetime),
     TimestampType: (datetime.datetime,),
     ArrayType: (list, tuple, array),
@@ -1246,6 +1218,10 @@ def _make_type_verifier(dataType, nullable=True, name=None):
     >>> _make_type_verifier(StructType([]))(None)
     >>> _make_type_verifier(StringType())("")
     >>> _make_type_verifier(LongType())(0)
+    >>> _make_type_verifier(LongType())(1 << 64) # doctest: +IGNORE_EXCEPTION_DETAIL
+    Traceback (most recent call last):
+        ...
+    ValueError:...
     >>> _make_type_verifier(ArrayType(ShortType()))(list(range(3)))
     >>> _make_type_verifier(ArrayType(StringType()))(set()) # doctest: +IGNORE_EXCEPTION_DETAIL
     Traceback (most recent call last):
@@ -1354,6 +1330,16 @@ def _make_type_verifier(dataType, nullable=True, name=None):
 
         verify_value = verify_integer
 
+    elif isinstance(dataType, LongType):
+        def verify_long(obj):
+            assert_acceptable_types(obj)
+            verify_acceptable_types(obj)
+            if obj < -9223372036854775808 or obj > 9223372036854775807:
+                raise ValueError(
+                    new_msg("object of LongType out of range, got: %s" % obj))
+
+        verify_value = verify_long
+
     elif isinstance(dataType, ArrayType):
         element_verifier = _make_type_verifier(
             dataType.elementType, dataType.containsNull, name="element in array %s" % name)
@@ -1440,7 +1426,7 @@ def _create_row(fields, values):
 class Row(tuple):
 
     """
-    A row in L{DataFrame}.
+    A row in :class:`DataFrame`.
     The fields in it can be accessed:
 
     * like attributes (``row.key``)
@@ -1448,10 +1434,23 @@ class Row(tuple):
 
     ``key in row`` will search through row keys.
 
-    Row can be used to create a row object by using named arguments,
-    the fields will be sorted by names. It is not allowed to omit
-    a named argument to represent the value is None or missing. This should be
-    explicitly set to None in this case.
+    Row can be used to create a row object by using named arguments.
+    It is not allowed to omit a named argument to represent the value is
+    None or missing. This should be explicitly set to None in this case.
+
+    NOTE: As of Spark 3.0.0, Rows created from named arguments no longer have
+    field names sorted alphabetically and will be ordered in the position as
+    entered. To enable sorting for Rows compatible with Spark 2.x, set the
+    environment variable "PYSPARK_ROW_FIELD_SORTING_ENABLED" to "true". This
+    option is deprecated and will be removed in future versions of Spark. For
+    Python versions < 3.6, the order of named arguments is not guaranteed to
+    be the same as entered, see https://www.python.org/dev/peps/pep-0468. In
+    this case, a warning will be issued and the Row will fallback to sort the
+    field names automatically.
+
+    NOTE: Examples with Row in pydocs are run with the environment variable
+    "PYSPARK_ROW_FIELD_SORTING_ENABLED" set to "true" which results in output
+    where fields are sorted.
 
     >>> row = Row(name="Alice", age=11)
     >>> row
@@ -1470,30 +1469,60 @@ class Row(tuple):
 
     >>> Person = Row("name", "age")
     >>> Person
-    <Row(name, age)>
+    <Row('name', 'age')>
     >>> 'name' in Person
     True
     >>> 'wrong_key' in Person
     False
     >>> Person("Alice", 11)
     Row(name='Alice', age=11)
+
+    This form can also be used to create rows as tuple values, i.e. with unnamed
+    fields. Beware that such Row objects have different equality semantics:
+
+    >>> row1 = Row("Alice", 11)
+    >>> row2 = Row(name="Alice", age=11)
+    >>> row1 == row2
+    False
+    >>> row3 = Row(a="Alice", b=11)
+    >>> row1 == row3
+    True
     """
 
-    def __new__(self, *args, **kwargs):
+    # Remove after Python < 3.6 dropped, see SPARK-29748
+    _row_field_sorting_enabled = \
+        os.environ.get('PYSPARK_ROW_FIELD_SORTING_ENABLED', 'false').lower() == 'true'
+
+    if _row_field_sorting_enabled:
+        warnings.warn("The environment variable 'PYSPARK_ROW_FIELD_SORTING_ENABLED' "
+                      "is deprecated and will be removed in future versions of Spark")
+
+    def __new__(cls, *args, **kwargs):
         if args and kwargs:
             raise ValueError("Can not use both args "
                              "and kwargs to create Row")
         if kwargs:
-            # create row objects
-            names = sorted(kwargs.keys())
-            row = tuple.__new__(self, [kwargs[n] for n in names])
-            row.__fields__ = names
-            row.__from_dict__ = True
-            return row
+            if not Row._row_field_sorting_enabled and sys.version_info[:2] < (3, 6):
+                warnings.warn("To use named arguments for Python version < 3.6, Row fields will be "
+                              "automatically sorted. This warning can be skipped by setting the "
+                              "environment variable 'PYSPARK_ROW_FIELD_SORTING_ENABLED' to 'true'.")
+                Row._row_field_sorting_enabled = True
 
+            # create row objects
+            if Row._row_field_sorting_enabled:
+                # Remove after Python < 3.6 dropped, see SPARK-29748
+                names = sorted(kwargs.keys())
+                row = tuple.__new__(cls, [kwargs[n] for n in names])
+                row.__fields__ = names
+                row.__from_dict__ = True
+            else:
+                row = tuple.__new__(cls, list(kwargs.values()))
+                row.__fields__ = list(kwargs.keys())
+
+            return row
         else:
             # create row class or objects
-            return tuple.__new__(self, args)
+            return tuple.__new__(cls, args)
 
     def asDict(self, recursive=False):
         """
@@ -1535,6 +1564,9 @@ class Row(tuple):
     # let object acts like class
     def __call__(self, *args):
         """create new Row object"""
+        if len(args) > len(self):
+            raise ValueError("Can not create Row with fields %s, expected %d values "
+                             "but got %s" % (self, len(self), args))
         return _create_row(self, args)
 
     def __getitem__(self, item):
@@ -1581,7 +1613,7 @@ class Row(tuple):
             return "Row(%s)" % ", ".join("%s=%r" % (k, v)
                                          for k, v in zip(self.__fields__, tuple(self)))
         else:
-            return "<Row(%s)>" % ", ".join(self)
+            return "<Row(%s)>" % ", ".join("%r" % field for field in self)
 
 
 class DateConverter(object):
@@ -1610,182 +1642,6 @@ register_input_converter(DatetimeConverter())
 register_input_converter(DateConverter())
 
 
-def to_arrow_type(dt):
-    """ Convert Spark data type to pyarrow type
-    """
-    import pyarrow as pa
-    if type(dt) == BooleanType:
-        arrow_type = pa.bool_()
-    elif type(dt) == ByteType:
-        arrow_type = pa.int8()
-    elif type(dt) == ShortType:
-        arrow_type = pa.int16()
-    elif type(dt) == IntegerType:
-        arrow_type = pa.int32()
-    elif type(dt) == LongType:
-        arrow_type = pa.int64()
-    elif type(dt) == FloatType:
-        arrow_type = pa.float32()
-    elif type(dt) == DoubleType:
-        arrow_type = pa.float64()
-    elif type(dt) == DecimalType:
-        arrow_type = pa.decimal128(dt.precision, dt.scale)
-    elif type(dt) == StringType:
-        arrow_type = pa.string()
-    elif type(dt) == DateType:
-        arrow_type = pa.date32()
-    elif type(dt) == TimestampType:
-        # Timestamps should be in UTC, JVM Arrow timestamps require a timezone to be read
-        arrow_type = pa.timestamp('us', tz='UTC')
-    elif type(dt) == ArrayType:
-        arrow_type = pa.list_(to_arrow_type(dt.elementType))
-    else:
-        raise TypeError("Unsupported type in conversion to Arrow: " + str(dt))
-    return arrow_type
-
-
-def to_arrow_schema(schema):
-    """ Convert a schema from Spark to Arrow
-    """
-    import pyarrow as pa
-    fields = [pa.field(field.name, to_arrow_type(field.dataType), nullable=field.nullable)
-              for field in schema]
-    return pa.schema(fields)
-
-
-def from_arrow_type(at):
-    """ Convert pyarrow type to Spark data type.
-    """
-    import pyarrow.types as types
-    if types.is_boolean(at):
-        spark_type = BooleanType()
-    elif types.is_int8(at):
-        spark_type = ByteType()
-    elif types.is_int16(at):
-        spark_type = ShortType()
-    elif types.is_int32(at):
-        spark_type = IntegerType()
-    elif types.is_int64(at):
-        spark_type = LongType()
-    elif types.is_float32(at):
-        spark_type = FloatType()
-    elif types.is_float64(at):
-        spark_type = DoubleType()
-    elif types.is_decimal(at):
-        spark_type = DecimalType(precision=at.precision, scale=at.scale)
-    elif types.is_string(at):
-        spark_type = StringType()
-    elif types.is_date32(at):
-        spark_type = DateType()
-    elif types.is_timestamp(at):
-        spark_type = TimestampType()
-    elif types.is_list(at):
-        spark_type = ArrayType(from_arrow_type(at.value_type))
-    else:
-        raise TypeError("Unsupported type in conversion from Arrow: " + str(at))
-    return spark_type
-
-
-def from_arrow_schema(arrow_schema):
-    """ Convert schema from Arrow to Spark.
-    """
-    return StructType(
-        [StructField(field.name, from_arrow_type(field.type), nullable=field.nullable)
-         for field in arrow_schema])
-
-
-def _check_dataframe_localize_timestamps(pdf, timezone):
-    """
-    Convert timezone aware timestamps to timezone-naive in the specified timezone or local timezone
-
-    :param pdf: pandas.DataFrame
-    :param timezone: the timezone to convert. if None then use local timezone
-    :return pandas.DataFrame where any timezone aware columns have been converted to tz-naive
-    """
-    from pyspark.sql.utils import require_minimum_pandas_version
-    require_minimum_pandas_version()
-
-    from pandas.api.types import is_datetime64tz_dtype
-    tz = timezone or 'tzlocal()'
-    for column, series in pdf.iteritems():
-        # TODO: handle nested timestamps, such as ArrayType(TimestampType())?
-        if is_datetime64tz_dtype(series.dtype):
-            pdf[column] = series.dt.tz_convert(tz).dt.tz_localize(None)
-    return pdf
-
-
-def _check_series_convert_timestamps_internal(s, timezone):
-    """
-    Convert a tz-naive timestamp in the specified timezone or local timezone to UTC normalized for
-    Spark internal storage
-
-    :param s: a pandas.Series
-    :param timezone: the timezone to convert. if None then use local timezone
-    :return pandas.Series where if it is a timestamp, has been UTC normalized without a time zone
-    """
-    from pyspark.sql.utils import require_minimum_pandas_version
-    require_minimum_pandas_version()
-
-    from pandas.api.types import is_datetime64_dtype, is_datetime64tz_dtype
-    # TODO: handle nested timestamps, such as ArrayType(TimestampType())?
-    if is_datetime64_dtype(s.dtype):
-        tz = timezone or 'tzlocal()'
-        return s.dt.tz_localize(tz).dt.tz_convert('UTC')
-    elif is_datetime64tz_dtype(s.dtype):
-        return s.dt.tz_convert('UTC')
-    else:
-        return s
-
-
-def _check_series_convert_timestamps_localize(s, from_timezone, to_timezone):
-    """
-    Convert timestamp to timezone-naive in the specified timezone or local timezone
-
-    :param s: a pandas.Series
-    :param from_timezone: the timezone to convert from. if None then use local timezone
-    :param to_timezone: the timezone to convert to. if None then use local timezone
-    :return pandas.Series where if it is a timestamp, has been converted to tz-naive
-    """
-    from pyspark.sql.utils import require_minimum_pandas_version
-    require_minimum_pandas_version()
-
-    import pandas as pd
-    from pandas.api.types import is_datetime64tz_dtype, is_datetime64_dtype
-    from_tz = from_timezone or 'tzlocal()'
-    to_tz = to_timezone or 'tzlocal()'
-    # TODO: handle nested timestamps, such as ArrayType(TimestampType())?
-    if is_datetime64tz_dtype(s.dtype):
-        return s.dt.tz_convert(to_tz).dt.tz_localize(None)
-    elif is_datetime64_dtype(s.dtype) and from_tz != to_tz:
-        # `s.dt.tz_localize('tzlocal()')` doesn't work properly when including NaT.
-        return s.apply(lambda ts: ts.tz_localize(from_tz).tz_convert(to_tz).tz_localize(None)
-                       if ts is not pd.NaT else pd.NaT)
-    else:
-        return s
-
-
-def _check_series_convert_timestamps_local_tz(s, timezone):
-    """
-    Convert timestamp to timezone-naive in the specified timezone or local timezone
-
-    :param s: a pandas.Series
-    :param timezone: the timezone to convert to. if None then use local timezone
-    :return pandas.Series where if it is a timestamp, has been converted to tz-naive
-    """
-    return _check_series_convert_timestamps_localize(s, None, timezone)
-
-
-def _check_series_convert_timestamps_tz_local(s, timezone):
-    """
-    Convert timestamp to timezone-naive in the specified timezone or local timezone
-
-    :param s: a pandas.Series
-    :param timezone: the timezone to convert from. if None then use local timezone
-    :return pandas.Series where if it is a timestamp, has been converted to tz-naive
-    """
-    return _check_series_convert_timestamps_localize(s, timezone, None)
-
-
 def _test():
     import doctest
     from pyspark.context import SparkContext
@@ -1797,7 +1653,7 @@ def _test():
     (failure_count, test_count) = doctest.testmod(globs=globs, optionflags=doctest.ELLIPSIS)
     globs['sc'].stop()
     if failure_count:
-        exit(-1)
+        sys.exit(-1)
 
 
 if __name__ == "__main__":

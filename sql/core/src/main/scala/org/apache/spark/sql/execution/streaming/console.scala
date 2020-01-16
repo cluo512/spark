@@ -17,44 +17,30 @@
 
 package org.apache.spark.sql.execution.streaming
 
-import java.util.Optional
+import java.util
+
+import scala.collection.JavaConverters._
 
 import org.apache.spark.sql._
-import org.apache.spark.sql.execution.streaming.sources.{ConsoleContinuousWriter, ConsoleMicroBatchWriter, ConsoleWriter}
+import org.apache.spark.sql.connector.catalog.{SupportsWrite, Table, TableCapability, TableProvider}
+import org.apache.spark.sql.connector.write.{LogicalWriteInfo, SupportsTruncate, WriteBuilder}
+import org.apache.spark.sql.connector.write.streaming.StreamingWrite
+import org.apache.spark.sql.execution.streaming.sources.ConsoleWrite
 import org.apache.spark.sql.sources.{BaseRelation, CreatableRelationProvider, DataSourceRegister}
-import org.apache.spark.sql.sources.v2.{DataSourceV2, DataSourceV2Options}
-import org.apache.spark.sql.sources.v2.streaming.{ContinuousWriteSupport, MicroBatchWriteSupport}
-import org.apache.spark.sql.sources.v2.streaming.writer.ContinuousWriter
-import org.apache.spark.sql.sources.v2.writer.DataSourceV2Writer
-import org.apache.spark.sql.streaming.OutputMode
 import org.apache.spark.sql.types.StructType
+import org.apache.spark.sql.util.CaseInsensitiveStringMap
 
 case class ConsoleRelation(override val sqlContext: SQLContext, data: DataFrame)
   extends BaseRelation {
   override def schema: StructType = data.schema
 }
 
-class ConsoleSinkProvider extends DataSourceV2
-  with MicroBatchWriteSupport
-  with ContinuousWriteSupport
+class ConsoleSinkProvider extends TableProvider
   with DataSourceRegister
   with CreatableRelationProvider {
 
-  override def createMicroBatchWriter(
-      queryId: String,
-      batchId: Long,
-      schema: StructType,
-      mode: OutputMode,
-      options: DataSourceV2Options): Optional[DataSourceV2Writer] = {
-    Optional.of(new ConsoleMicroBatchWriter(batchId, schema, options))
-  }
-
-  override def createContinuousWriter(
-      queryId: String,
-      schema: StructType,
-      mode: OutputMode,
-      options: DataSourceV2Options): Optional[ContinuousWriter] = {
-    Optional.of(new ConsoleContinuousWriter(schema, options))
+  override def getTable(options: CaseInsensitiveStringMap): Table = {
+    ConsoleTable
   }
 
   def createRelation(
@@ -73,4 +59,29 @@ class ConsoleSinkProvider extends DataSourceV2
   }
 
   def shortName(): String = "console"
+}
+
+object ConsoleTable extends Table with SupportsWrite {
+
+  override def name(): String = "console"
+
+  override def schema(): StructType = StructType(Nil)
+
+  override def capabilities(): util.Set[TableCapability] = {
+    Set(TableCapability.STREAMING_WRITE).asJava
+  }
+
+  override def newWriteBuilder(info: LogicalWriteInfo): WriteBuilder = {
+    new WriteBuilder with SupportsTruncate {
+      private val inputSchema: StructType = info.schema()
+
+      // Do nothing for truncate. Console sink is special that it just prints all the records.
+      override def truncate(): WriteBuilder = this
+
+      override def buildForStreaming(): StreamingWrite = {
+        assert(inputSchema != null)
+        new ConsoleWrite(inputSchema, info.options)
+      }
+    }
+  }
 }

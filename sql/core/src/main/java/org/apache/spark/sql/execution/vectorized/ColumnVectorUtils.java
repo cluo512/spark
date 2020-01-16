@@ -20,8 +20,10 @@ import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
 import java.sql.Date;
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 
 import org.apache.spark.memory.MemoryMode;
 import org.apache.spark.sql.Row;
@@ -30,6 +32,7 @@ import org.apache.spark.sql.catalyst.util.DateTimeUtils;
 import org.apache.spark.sql.types.*;
 import org.apache.spark.sql.vectorized.ColumnarArray;
 import org.apache.spark.sql.vectorized.ColumnarBatch;
+import org.apache.spark.sql.vectorized.ColumnarMap;
 import org.apache.spark.unsafe.types.CalendarInterval;
 import org.apache.spark.unsafe.types.UTF8String;
 
@@ -109,6 +112,18 @@ public class ColumnVectorUtils {
     return array.toIntArray();
   }
 
+  public static Map<Integer, Integer> toJavaIntMap(ColumnarMap map) {
+    int[] keys = toJavaIntArray(map.keyArray());
+    int[] values = toJavaIntArray(map.valueArray());
+    assert keys.length == values.length;
+
+    Map<Integer, Integer> result = new HashMap<>();
+    for (int i = 0; i < keys.length; i++) {
+      result.put(keys[i], values[i]);
+    }
+    return result;
+  }
+
   private static void appendValue(WritableColumnVector dst, DataType t, Object o) {
     if (o == null) {
       if (t instanceof CalendarIntervalType) {
@@ -150,7 +165,8 @@ public class ColumnVectorUtils {
         CalendarInterval c = (CalendarInterval)o;
         dst.appendStruct(false);
         dst.getChild(0).appendInt(c.months);
-        dst.getChild(1).appendLong(c.microseconds);
+        dst.getChild(1).appendInt(c.days);
+        dst.getChild(2).appendLong(c.microseconds);
       } else if (t instanceof DateType) {
         dst.appendInt(DateTimeUtils.fromJavaDate((Date)o));
       } else {

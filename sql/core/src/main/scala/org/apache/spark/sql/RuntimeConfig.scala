@@ -17,10 +17,11 @@
 
 package org.apache.spark.sql
 
-import org.apache.spark.annotation.InterfaceStability
+import org.apache.spark.annotation.Stable
+import org.apache.spark.internal.Logging
 import org.apache.spark.internal.config.{ConfigEntry, OptionalConfigEntry}
 import org.apache.spark.sql.internal.SQLConf
-
+import org.apache.spark.sql.internal.SQLConf.{DeprecatedConfig, RemovedConfig}
 
 /**
  * Runtime configuration interface for Spark. To access this, use `SparkSession.conf`.
@@ -29,8 +30,8 @@ import org.apache.spark.sql.internal.SQLConf
  *
  * @since 2.0.0
  */
-@InterfaceStability.Stable
-class RuntimeConfig private[sql](sqlConf: SQLConf = new SQLConf) {
+@Stable
+class RuntimeConfig private[sql](sqlConf: SQLConf = new SQLConf) extends Logging {
 
   /**
    * Sets the given Spark runtime configuration property.
@@ -39,6 +40,8 @@ class RuntimeConfig private[sql](sqlConf: SQLConf = new SQLConf) {
    */
   def set(key: String, value: String): Unit = {
     requireNonStaticConf(key)
+    requireDefaultValueOfRemovedConf(key, value)
+    logDeprecationWarning(key)
     sqlConf.setConfString(key, value)
   }
 
@@ -48,7 +51,6 @@ class RuntimeConfig private[sql](sqlConf: SQLConf = new SQLConf) {
    * @since 2.0.0
    */
   def set(key: String, value: Boolean): Unit = {
-    requireNonStaticConf(key)
     set(key, value.toString)
   }
 
@@ -58,7 +60,6 @@ class RuntimeConfig private[sql](sqlConf: SQLConf = new SQLConf) {
    * @since 2.0.0
    */
   def set(key: String, value: Long): Unit = {
-    requireNonStaticConf(key)
     set(key, value.toString)
   }
 
@@ -129,8 +130,20 @@ class RuntimeConfig private[sql](sqlConf: SQLConf = new SQLConf) {
    */
   def unset(key: String): Unit = {
     requireNonStaticConf(key)
+    logDeprecationWarning(key)
     sqlConf.unsetConf(key)
   }
+
+  /**
+   * Indicates whether the configuration property with the given key
+   * is modifiable in the current session.
+   *
+   * @return `true` if the configuration property is modifiable. For static SQL, Spark Core,
+   *         invalid (not existing) and other non-modifiable configuration properties,
+   *         the returned value is `false`.
+   * @since 2.4.0
+   */
+  def isModifiable(key: String): Boolean = sqlConf.isModifiable(key)
 
   /**
    * Returns whether a particular key is set.
@@ -142,6 +155,32 @@ class RuntimeConfig private[sql](sqlConf: SQLConf = new SQLConf) {
   private def requireNonStaticConf(key: String): Unit = {
     if (SQLConf.staticConfKeys.contains(key)) {
       throw new AnalysisException(s"Cannot modify the value of a static config: $key")
+    }
+    if (sqlConf.setCommandRejectsSparkCoreConfs &&
+        ConfigEntry.findEntry(key) != null && !SQLConf.sqlConfEntries.containsKey(key)) {
+      throw new AnalysisException(s"Cannot modify the value of a Spark config: $key")
+    }
+  }
+
+  private def requireDefaultValueOfRemovedConf(key: String, value: String): Unit = {
+    SQLConf.removedSQLConfigs.get(key).foreach {
+      case RemovedConfig(configName, version, defaultValue, comment) =>
+        if (value != defaultValue) {
+          throw new AnalysisException(
+            s"The SQL config '$configName' was removed in the version $version. $comment")
+        }
+    }
+  }
+
+  /**
+   * Logs a warning message if the given config key is deprecated.
+   */
+  private def logDeprecationWarning(key: String): Unit = {
+    SQLConf.deprecatedSQLConfigs.get(key).foreach {
+      case DeprecatedConfig(configName, version, comment) =>
+        logWarning(
+          s"The SQL config '$configName' has been deprecated in Spark v$version " +
+          s"and may be removed in the future. $comment")
     }
   }
 }

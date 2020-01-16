@@ -18,11 +18,14 @@
 User-defined function related classes and functions
 """
 import functools
+import sys
 
 from pyspark import SparkContext, since
 from pyspark.rdd import _prepare_for_python_RDD, PythonEvalType, ignore_unicode_prefix
 from pyspark.sql.column import Column, _to_java_column, _to_seq
 from pyspark.sql.types import StringType, DataType, StructType, _parse_datatype_string
+from pyspark.sql.pandas.types import to_arrow_type
+from pyspark.util import _get_argspec
 
 __all__ = ["UDFRegistration"]
 
@@ -36,26 +39,39 @@ def _wrap_function(sc, func, returnType):
 
 def _create_udf(f, returnType, evalType):
 
-    if evalType == PythonEvalType.SQL_PANDAS_SCALAR_UDF or \
-            evalType == PythonEvalType.SQL_PANDAS_GROUP_MAP_UDF:
-        import inspect
-        from pyspark.sql.utils import require_minimum_pyarrow_version
+    if evalType in (PythonEvalType.SQL_SCALAR_PANDAS_UDF,
+                    PythonEvalType.SQL_SCALAR_PANDAS_ITER_UDF,
+                    PythonEvalType.SQL_GROUPED_MAP_PANDAS_UDF,
+                    PythonEvalType.SQL_COGROUPED_MAP_PANDAS_UDF,
+                    PythonEvalType.SQL_GROUPED_AGG_PANDAS_UDF,
+                    PythonEvalType.SQL_MAP_PANDAS_ITER_UDF):
 
+        from pyspark.sql.pandas.utils import require_minimum_pyarrow_version
         require_minimum_pyarrow_version()
-        argspec = inspect.getargspec(f)
 
-        if evalType == PythonEvalType.SQL_PANDAS_SCALAR_UDF and len(argspec.args) == 0 and \
+        argspec = _get_argspec(f)
+
+        if (evalType == PythonEvalType.SQL_SCALAR_PANDAS_UDF or
+                evalType == PythonEvalType.SQL_SCALAR_PANDAS_ITER_UDF) and \
+                len(argspec.args) == 0 and \
                 argspec.varargs is None:
             raise ValueError(
                 "Invalid function: 0-arg pandas_udfs are not supported. "
                 "Instead, create a 1-arg pandas_udf and ignore the arg in your function."
             )
 
-        if evalType == PythonEvalType.SQL_PANDAS_GROUP_MAP_UDF and len(argspec.args) != 1:
+        if evalType == PythonEvalType.SQL_GROUPED_MAP_PANDAS_UDF \
+                and len(argspec.args) not in (1, 2):
             raise ValueError(
-                "Invalid function: pandas_udfs with function type GROUP_MAP "
-                "must take a single arg that is a pandas DataFrame."
-            )
+                "Invalid function: pandas_udfs with function type GROUPED_MAP "
+                "must take either one argument (data) or two arguments (key, data).")
+
+        if evalType == PythonEvalType.SQL_COGROUPED_MAP_PANDAS_UDF \
+                and len(argspec.args) not in (2, 3):
+            raise ValueError(
+                "Invalid function: pandas_udfs with function type COGROUPED_MAP "
+                "must take either two arguments (left, right) "
+                "or three arguments (key, left, right).")
 
     # Set the name of the UserDefinedFunction object to be the name of function f
     udf_obj = UserDefinedFunction(
@@ -68,6 +84,10 @@ class UserDefinedFunction(object):
     User defined function in Python
 
     .. versionadded:: 1.3
+
+    .. note:: The constructor of this class is not supposed to be directly called.
+        Use :meth:`pyspark.sql.functions.udf` or :meth:`pyspark.sql.functions.pandas_udf`
+        to create this instance.
     """
     def __init__(self, func,
                  returnType=StringType(),
@@ -109,10 +129,57 @@ class UserDefinedFunction(object):
             else:
                 self._returnType_placeholder = _parse_datatype_string(self._returnType)
 
-        if self.evalType == PythonEvalType.SQL_PANDAS_GROUP_MAP_UDF \
-                and not isinstance(self._returnType_placeholder, StructType):
-            raise ValueError("Invalid returnType: returnType must be a StructType for "
-                             "pandas_udf with function type GROUP_MAP")
+        if self.evalType == PythonEvalType.SQL_SCALAR_PANDAS_UDF or \
+                self.evalType == PythonEvalType.SQL_SCALAR_PANDAS_ITER_UDF:
+            try:
+                to_arrow_type(self._returnType_placeholder)
+            except TypeError:
+                raise NotImplementedError(
+                    "Invalid returnType with scalar Pandas UDFs: %s is "
+                    "not supported" % str(self._returnType_placeholder))
+        elif self.evalType == PythonEvalType.SQL_GROUPED_MAP_PANDAS_UDF:
+            if isinstance(self._returnType_placeholder, StructType):
+                try:
+                    to_arrow_type(self._returnType_placeholder)
+                except TypeError:
+                    raise NotImplementedError(
+                        "Invalid returnType with grouped map Pandas UDFs: "
+                        "%s is not supported" % str(self._returnType_placeholder))
+            else:
+                raise TypeError("Invalid returnType for grouped map Pandas "
+                                "UDFs: returnType must be a StructType.")
+        elif self.evalType == PythonEvalType.SQL_MAP_PANDAS_ITER_UDF:
+            if isinstance(self._returnType_placeholder, StructType):
+                try:
+                    to_arrow_type(self._returnType_placeholder)
+                except TypeError:
+                    raise NotImplementedError(
+                        "Invalid returnType with map iterator Pandas UDFs: "
+                        "%s is not supported" % str(self._returnType_placeholder))
+            else:
+                raise TypeError("Invalid returnType for map iterator Pandas "
+                                "UDFs: returnType must be a StructType.")
+        elif self.evalType == PythonEvalType.SQL_COGROUPED_MAP_PANDAS_UDF:
+            if isinstance(self._returnType_placeholder, StructType):
+                try:
+                    to_arrow_type(self._returnType_placeholder)
+                except TypeError:
+                    raise NotImplementedError(
+                        "Invalid returnType with cogrouped map Pandas UDFs: "
+                        "%s is not supported" % str(self._returnType_placeholder))
+            else:
+                raise TypeError("Invalid returnType for cogrouped map Pandas "
+                                "UDFs: returnType must be a StructType.")
+        elif self.evalType == PythonEvalType.SQL_GROUPED_AGG_PANDAS_UDF:
+            try:
+                # StructType is not yet allowed as a return type, explicitly check here to fail fast
+                if isinstance(self._returnType_placeholder, StructType):
+                    raise TypeError
+                to_arrow_type(self._returnType_placeholder)
+            except TypeError:
+                raise NotImplementedError(
+                    "Invalid returnType with grouped aggregate Pandas UDFs: "
+                    "%s is not supported" % str(self._returnType_placeholder))
 
         return self._returnType_placeholder
 
@@ -181,6 +248,9 @@ class UserDefinedFunction(object):
 
         .. versionadded:: 2.3
         """
+        # Here, we explicitly clean the cache to create a JVM UDF instance
+        # with 'deterministic' updated. See SPARK-23233.
+        self._judf_placeholder = None
         self.deterministic = False
         return self
 
@@ -270,6 +340,15 @@ class UDFRegistration(object):
             >>> spark.sql("SELECT add_one(id) FROM range(3)").collect()  # doctest: +SKIP
             [Row(add_one(id)=1), Row(add_one(id)=2), Row(add_one(id)=3)]
 
+            >>> @pandas_udf("integer", PandasUDFType.GROUPED_AGG)  # doctest: +SKIP
+            ... def sum_udf(v):
+            ...     return v.sum()
+            ...
+            >>> _ = spark.udf.register("sum_udf", sum_udf)  # doctest: +SKIP
+            >>> q = "SELECT sum_udf(v1) FROM VALUES (3, 0), (2, 0), (1, 1) tbl(v1, v2) GROUP BY v2"
+            >>> spark.sql(q).collect()  # doctest: +SKIP
+            [Row(sum_udf(v1)=1), Row(sum_udf(v1)=5)]
+
             .. note:: Registration for a user-defined function (case 2.) was added from
                 Spark 2.3.0.
         """
@@ -282,9 +361,14 @@ class UDFRegistration(object):
                     "Invalid returnType: data type can not be specified when f is"
                     "a user-defined function, but got %s." % returnType)
             if f.evalType not in [PythonEvalType.SQL_BATCHED_UDF,
-                                  PythonEvalType.SQL_PANDAS_SCALAR_UDF]:
+                                  PythonEvalType.SQL_SCALAR_PANDAS_UDF,
+                                  PythonEvalType.SQL_SCALAR_PANDAS_ITER_UDF,
+                                  PythonEvalType.SQL_GROUPED_AGG_PANDAS_UDF,
+                                  PythonEvalType.SQL_MAP_PANDAS_ITER_UDF]:
                 raise ValueError(
-                    "Invalid f: f must be either SQL_BATCHED_UDF or SQL_PANDAS_SCALAR_UDF")
+                    "Invalid f: f must be SQL_BATCHED_UDF, SQL_SCALAR_PANDAS_UDF, "
+                    "SQL_SCALAR_PANDAS_ITER_UDF, SQL_GROUPED_AGG_PANDAS_UDF or "
+                    "SQL_MAP_PANDAS_ITER_UDF.")
             register_udf = UserDefinedFunction(f.func, returnType=f.returnType, name=name,
                                                evalType=f.evalType,
                                                deterministic=f.deterministic)
@@ -315,17 +399,17 @@ class UDFRegistration(object):
         >>> spark.udf.registerJavaFunction(
         ...     "javaStringLength", "test.org.apache.spark.sql.JavaStringLength", IntegerType())
         >>> spark.sql("SELECT javaStringLength('test')").collect()
-        [Row(UDF:javaStringLength(test)=4)]
+        [Row(javaStringLength(test)=4)]
 
         >>> spark.udf.registerJavaFunction(
         ...     "javaStringLength2", "test.org.apache.spark.sql.JavaStringLength")
         >>> spark.sql("SELECT javaStringLength2('test')").collect()
-        [Row(UDF:javaStringLength2(test)=4)]
+        [Row(javaStringLength2(test)=4)]
 
         >>> spark.udf.registerJavaFunction(
         ...     "javaStringLength3", "test.org.apache.spark.sql.JavaStringLength", "integer")
         >>> spark.sql("SELECT javaStringLength3('test')").collect()
-        [Row(UDF:javaStringLength3(test)=4)]
+        [Row(javaStringLength3(test)=4)]
         """
 
         jdt = None
@@ -345,8 +429,9 @@ class UDFRegistration(object):
 
         >>> spark.udf.registerJavaUDAF("javaUDAF", "test.org.apache.spark.sql.MyDoubleAvg")
         >>> df = spark.createDataFrame([(1, "a"),(2, "b"), (3, "a")],["id", "name"])
-        >>> df.registerTempTable("df")
-        >>> spark.sql("SELECT name, javaUDAF(id) as avg from df group by name").collect()
+        >>> df.createOrReplaceTempView("df")
+        >>> spark.sql("SELECT name, javaUDAF(id) as avg from df group by name order by name desc") \
+                .collect()
         [Row(name=u'b', avg=102.0), Row(name=u'a', avg=102.0)]
         """
 
@@ -368,7 +453,7 @@ def _test():
         optionflags=doctest.ELLIPSIS | doctest.NORMALIZE_WHITESPACE)
     spark.stop()
     if failure_count:
-        exit(-1)
+        sys.exit(-1)
 
 
 if __name__ == "__main__":
